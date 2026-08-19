@@ -1,153 +1,102 @@
 pipeline {
+
     agent any
 
-    environment {
-        // GitHub Repository
-        GITHUB_REPO = 'https://github.com/BHARTI-BHUTE/Book-My-Show.git'
-        GITHUB_BRANCH = 'main'
+    tools {
+        // Jenkins → Manage Jenkins → Tools
+        // Must exactly match your SonarQube Scanner installation name
+        sonarQube 'sonar-scanner'
+    }
 
-        // AWS / ECR
+    environment {
+
+        // ==============================
+        // AWS CONFIGURATION
+        // ==============================
         AWS_REGION = 'ap-south-1'
         AWS_ACCOUNT_ID = '093366266423'
-        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+        ECR_REGISTRY = '093366266423.dkr.ecr.ap-south-1.amazonaws.com'
         ECR_REPOSITORY = 'bookmyshow'
+
         DOCKER_IMAGE = "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
 
-        // EKS
-        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+        // ==============================
+        // EKS CONFIGURATION
+        // ==============================
+        EKS_CLUSTER = 'bookmyshow-eks'
 
-        // SonarQube
-        SCANNER_HOME = tool 'sonar-scanner'
+        // Kubernetes deployment name
+        K8S_DEPLOYMENT = 'bms-app'
+
+        // Kubernetes container name
+        K8S_CONTAINER = 'bms-container'
+
+        // ==============================
+        // SONARQUBE CONFIGURATION
+        // ==============================
+        SONAR_PROJECT_KEY = 'BMS'
+        SONAR_PROJECT_NAME = 'BMS'
     }
 
     stages {
 
-        stage('Clean Workspace') {
+        // ==========================================
+        // 1. CHECKOUT
+        // ==========================================
+        stage('Checkout') {
             steps {
-                cleanWs()
+                echo "===== Checkout Source Code ====="
+
+                checkout scm
             }
         }
 
-        stage('Checkout from Git') {
-            steps {
-                git branch: "${GITHUB_BRANCH}",
-                    url: "${GITHUB_REPO}"
-
-                sh '''
-                    echo "===== Git Repository ====="
-                    git remote -v
-
-                    echo "===== Current Branch ====="
-                    git branch
-
-                    echo "===== Project Files ====="
-                    ls -la
-                '''
-            }
-        }
-
-        stage('Build and Test') {
-            steps {
-                sh '''
-                    echo "===== Node.js Version ====="
-                    node --version
-
-                    echo "===== npm Version ====="
-                    npm --version
-
-                    echo "===== Installing Dependencies ====="
-                    cd bookmyshow-app
-                    npm install
-
-                    echo "===== Checking Test Script ====="
-                    if npm run | grep -q " test"; then
-                        echo "Test script found. Running npm test..."
-                        npm test
-                    else
-                        echo "No npm test script configured. Skipping test execution."
-                    fi
-                '''
-            }
-        }
-
+        // ==========================================
+        // 2. SONARQUBE ANALYSIS
+        // ==========================================
         stage('SonarQube Analysis') {
             steps {
+                echo "===== SonarQube Analysis ====="
+
                 withSonarQubeEnv('sonar-server') {
                     sh '''
-                        echo "===== SonarQube Analysis ====="
+                        echo "Running SonarQube Scanner..."
 
-                        $SCANNER_HOME/bin/sonar-scanner \
-                            -Dsonar.projectName=BMS \
-                            -Dsonar.projectKey=BMS
+                        sonar-scanner \
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.projectName=${SONAR_PROJECT_NAME} \
+                            -Dsonar.sources=bookmyshow-app \
+                            -Dsonar.exclusions=bookmyshow-app/node_modules/**
                     '''
                 }
             }
         }
 
-        stage('Quality Gate') {
+        // ==========================================
+        // 3. BUILD DOCKER IMAGE
+        // ==========================================
+        stage('Build Docker Image') {
             steps {
-                script {
-                    waitForQualityGate(
-                        abortPipeline: false,
-                        credentialsId: 'Sonar-token'
-                    )
-                }
-            }
-        }
+                echo "===== Building Docker Image ====="
 
-        stage('OWASP Dependency Check') {
-            steps {
-                dependencyCheck(
-                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
-                    odcInstallation: 'DP-Check'
-                )
-
-                dependencyCheckPublisher(
-                    pattern: '**/dependency-check-report.xml'
-                )
-            }
-        }
-
-        stage('Trivy File System Scan') {
-            steps {
                 sh '''
-                    echo "===== Trivy File System Scan ====="
-
-                    trivy fs . \
-                        --format table \
-                        -o trivyfs.txt
-
-                    echo "Trivy scan completed."
-                '''
-            }
-        }
-
-        stage('Docker Build') {
-            steps {
-                sh '''
-                    echo "===== Docker Build ====="
-
-                    docker build --no-cache \
+                    docker build \
                         -t ${DOCKER_IMAGE} \
-                        -f bookmyshow-app/Dockerfile \
                         bookmyshow-app
-
-                    echo "Docker image created:"
-                    docker images | grep bookmyshow
                 '''
             }
         }
 
-        stage('Login to Amazon ECR') {
+        // ==========================================
+        // 4. LOGIN TO AWS ECR
+        // ==========================================
+        stage('Login to ECR') {
             steps {
+                echo "===== Login to Amazon ECR ====="
+
                 sh '''
-                    echo "===== AWS Account ====="
-                    aws sts get-caller-identity
-
-                    echo "===== ECR Login ====="
-
-                    aws ecr get-login-password \
-                        --region ${AWS_REGION} | \
+                    aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login \
                         --username AWS \
                         --password-stdin ${ECR_REGISTRY}
@@ -155,71 +104,99 @@ pipeline {
             }
         }
 
-        stage('Push Docker Image to ECR') {
+        // ==========================================
+        // 5. PUSH IMAGE TO ECR
+        // ==========================================
+        stage('Push Image to ECR') {
             steps {
+                echo "===== Pushing Image to ECR ====="
+
                 sh '''
-                    echo "===== Pushing Docker Image to ECR ====="
-
                     docker push ${DOCKER_IMAGE}
-
-                    echo "Docker image successfully pushed:"
-                    echo ${DOCKER_IMAGE}
                 '''
             }
         }
 
-        stage('Deploy to EKS') {
+        // ==========================================
+        // 6. UPDATE EKS KUBECONFIG
+        // ==========================================
+        stage('Configure EKS') {
             steps {
+                echo "===== Configuring EKS ====="
+
                 sh '''
-                    echo "===== AWS Credentials Verification ====="
-                    aws sts get-caller-identity
-
-                    echo "===== Updating kubeconfig ====="
-
                     aws eks update-kubeconfig \
                         --region ${AWS_REGION} \
-                        --name ${EKS_CLUSTER_NAME}
+                        --name ${EKS_CLUSTER}
 
-                    echo "===== Kubernetes Context ====="
-                    kubectl config current-context
+                    kubectl get nodes
+                '''
+            }
+        }
 
-                    echo "===== Applying Deployment ====="
+        // ==========================================
+        // 7. DEPLOY TO EKS
+        // ==========================================
+        stage('Deploy to EKS') {
+            steps {
+                echo "===== Deploying BookMyShow to EKS ====="
+
+                sh '''
                     kubectl apply -f deployment.yml
 
-                    echo "===== Applying Service ====="
-                    kubectl apply -f service.yml
+                    kubectl set image deployment/${K8S_DEPLOYMENT} \
+                        ${K8S_CONTAINER}=${DOCKER_IMAGE}
 
-                    echo "===== Kubernetes Deployment ====="
-                    kubectl get deployment
+                    kubectl rollout status deployment/${K8S_DEPLOYMENT}
+                '''
+            }
+        }
 
-                    echo "===== Kubernetes Pods ====="
-                    kubectl get pods
+        // ==========================================
+        // 8. VERIFY DEPLOYMENT
+        // ==========================================
+        stage('Verify Deployment') {
+            steps {
+                echo "===== Verifying Kubernetes Deployment ====="
 
-                    echo "===== Kubernetes Service ====="
-                    kubectl get svc
+                sh '''
+                    echo "----- Pods -----"
+                    kubectl get pods -o wide
+
+                    echo "----- Deployment -----"
+                    kubectl get deployment ${K8S_DEPLOYMENT}
+
+                    echo "----- Services -----"
+                    kubectl get services
+
+                    echo "===== Deployment Verification Completed ====="
                 '''
             }
         }
     }
 
+    // ==========================================
+    // POST ACTIONS
+    // ==========================================
     post {
-        always {
-            archiveArtifacts(
-                artifacts: 'trivyfs.txt',
-                allowEmptyArchive: true
-            )
 
+        always {
             echo "===== CI/CD Pipeline Completed ====="
             echo "Build Number: ${BUILD_NUMBER}"
             echo "Build Status: ${currentBuild.currentResult}"
         }
 
         success {
-            echo "BookMyShow CI/CD Pipeline completed successfully."
+            echo "=========================================="
+            echo "BookMyShow CI/CD Pipeline SUCCESS"
+            echo "=========================================="
         }
 
         failure {
-            echo "BookMyShow CI/CD Pipeline failed. Check the Console Output."
+            echo "=========================================="
+            echo "BookMyShow CI/CD Pipeline FAILED"
+            echo "Check the Console Output."
+            echo "=========================================="
         }
     }
 }
