@@ -2,11 +2,15 @@ pipeline {
 
     agent any
 
+    options {
+        skipDefaultCheckout(true)
+    }
+
     environment {
 
-        // ==============================
+        // ==========================================
         // AWS CONFIGURATION
-        // ==============================
+        // ==========================================
         AWS_REGION = 'ap-south-1'
         AWS_ACCOUNT_ID = '093366266423'
 
@@ -15,19 +19,23 @@ pipeline {
 
         DOCKER_IMAGE = "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
 
-        // ==============================
+
+        // ==========================================
         // EKS CONFIGURATION
-        // ==============================
+        // ==========================================
         EKS_CLUSTER = 'bookmyshow-eks'
+
         K8S_DEPLOYMENT = 'bms-app'
         K8S_CONTAINER = 'bms-container'
 
-        // ==============================
+
+        // ==========================================
         // SONARQUBE CONFIGURATION
-        // ==============================
+        // ==========================================
         SONAR_PROJECT_KEY = 'BMS'
         SONAR_PROJECT_NAME = 'BMS'
     }
+
 
     stages {
 
@@ -35,26 +43,49 @@ pipeline {
         // 1. CHECKOUT
         // ==========================================
         stage('Checkout') {
+
             steps {
-                echo "===== Checkout Source Code ====="
+
+                echo "=========================================="
+                echo "Checking out BookMyShow source code"
+                echo "=========================================="
 
                 checkout scm
             }
         }
 
+
         // ==========================================
         // 2. SONARQUBE ANALYSIS
         // ==========================================
         stage('SonarQube Analysis') {
-            steps {
-                echo "===== SonarQube Analysis ====="
 
-                withSonarQubeEnv('sonar-server') {
-                    script {
-                        def scannerHome = tool 'sonar-scanner'
+            steps {
+
+                echo "=========================================="
+                echo "SonarQube Code Analysis"
+                echo "=========================================="
+
+                script {
+
+                    // Jenkins:
+                    // Manage Jenkins
+                    // → Tools
+                    // → SonarQube Scanner
+                    // → Name: sonar-scanner
+
+                    def scannerHome = tool 'sonar-scanner'
+
+                    // Jenkins:
+                    // Manage Jenkins
+                    // → System
+                    // → SonarQube servers
+                    // → Name: SonarQube
+
+                    withSonarQubeEnv('SonarQube') {
 
                         sh """
-                            echo "Running SonarQube Scanner..."
+                            echo "===== Running SonarQube Scanner ====="
 
                             ${scannerHome}/bin/sonar-scanner \
                                 -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
@@ -67,107 +98,166 @@ pipeline {
             }
         }
 
+
         // ==========================================
         // 3. BUILD DOCKER IMAGE
         // ==========================================
         stage('Build Docker Image') {
-            steps {
-                echo "===== Building Docker Image ====="
 
-                sh '''
+            steps {
+
+                echo "=========================================="
+                echo "Building Docker Image"
+                echo "=========================================="
+
+                sh """
                     docker build \
                         -t ${DOCKER_IMAGE} \
                         bookmyshow-app
-                '''
+                """
+
+                echo "Docker image built successfully."
             }
         }
+
 
         // ==========================================
         // 4. LOGIN TO AWS ECR
         // ==========================================
         stage('Login to ECR') {
-            steps {
-                echo "===== Login to Amazon ECR ====="
 
-                sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
+            steps {
+
+                echo "=========================================="
+                echo "Logging in to Amazon ECR"
+                echo "=========================================="
+
+                sh """
+                    aws ecr get-login-password \
+                        --region ${AWS_REGION} | \
                     docker login \
                         --username AWS \
                         --password-stdin ${ECR_REGISTRY}
-                '''
+                """
+
+                echo "ECR login successful."
             }
         }
+
 
         // ==========================================
         // 5. PUSH IMAGE TO ECR
         // ==========================================
         stage('Push Image to ECR') {
-            steps {
-                echo "===== Pushing Image to ECR ====="
 
-                sh '''
+            steps {
+
+                echo "=========================================="
+                echo "Pushing Docker Image to ECR"
+                echo "=========================================="
+
+                sh """
                     docker push ${DOCKER_IMAGE}
-                '''
+                """
+
+                echo "Docker image pushed successfully."
             }
         }
+
 
         // ==========================================
         // 6. CONFIGURE EKS
         // ==========================================
         stage('Configure EKS') {
-            steps {
-                echo "===== Configuring EKS ====="
 
-                sh '''
+            steps {
+
+                echo "=========================================="
+                echo "Configuring Amazon EKS"
+                echo "=========================================="
+
+                sh """
                     aws eks update-kubeconfig \
                         --region ${AWS_REGION} \
                         --name ${EKS_CLUSTER}
 
+                    echo "===== EKS Nodes ====="
+
                     kubectl get nodes
-                '''
+                """
             }
         }
+
 
         // ==========================================
         // 7. DEPLOY TO EKS
         // ==========================================
         stage('Deploy to EKS') {
-            steps {
-                echo "===== Deploying BookMyShow to EKS ====="
 
-                sh '''
+            steps {
+
+                echo "=========================================="
+                echo "Deploying BookMyShow to EKS"
+                echo "=========================================="
+
+                sh """
+                    echo "===== Applying Kubernetes Deployment ====="
+
                     kubectl apply -f deployment.yml
+
+                    echo "===== Updating Docker Image ====="
 
                     kubectl set image deployment/${K8S_DEPLOYMENT} \
                         ${K8S_CONTAINER}=${DOCKER_IMAGE}
 
-                    kubectl rollout status deployment/${K8S_DEPLOYMENT}
-                '''
+                    echo "===== Waiting for Rollout ====="
+
+                    kubectl rollout status deployment/${K8S_DEPLOYMENT} \
+                        --timeout=300s
+                """
+
+                echo "BookMyShow deployment completed."
             }
         }
+
 
         // ==========================================
         // 8. VERIFY DEPLOYMENT
         // ==========================================
         stage('Verify Deployment') {
-            steps {
-                echo "===== Verifying Kubernetes Deployment ====="
 
-                sh '''
-                    echo "----- Pods -----"
+            steps {
+
+                echo "=========================================="
+                echo "Verifying Kubernetes Deployment"
+                echo "=========================================="
+
+                sh """
+                    echo ""
+                    echo "===== PODS ====="
                     kubectl get pods -o wide
 
-                    echo "----- Deployment -----"
+                    echo ""
+                    echo "===== DEPLOYMENT ====="
                     kubectl get deployment ${K8S_DEPLOYMENT}
 
-                    echo "----- Services -----"
+                    echo ""
+                    echo "===== SERVICES ====="
                     kubectl get services
 
-                    echo "===== Deployment Verification Completed ====="
-                '''
+                    echo ""
+                    echo "===== DEPLOYMENT DETAILS ====="
+                    kubectl describe deployment ${K8S_DEPLOYMENT}
+
+                    echo ""
+                    echo "=========================================="
+                    echo "EKS Deployment Verification Completed"
+                    echo "=========================================="
+                """
             }
         }
     }
+
 
     // ==========================================
     // POST ACTIONS
@@ -175,22 +265,31 @@ pipeline {
     post {
 
         always {
-            echo "===== CI/CD Pipeline Completed ====="
+
+            echo "=========================================="
+            echo "CI/CD Pipeline Completed"
+            echo "=========================================="
+
             echo "Build Number: ${BUILD_NUMBER}"
             echo "Build Status: ${currentBuild.currentResult}"
         }
 
+
         success {
+
             echo "=========================================="
             echo "BookMyShow CI/CD Pipeline SUCCESS"
             echo "=========================================="
         }
 
+
         failure {
+
             echo "=========================================="
             echo "BookMyShow CI/CD Pipeline FAILED"
-            echo "Check the Console Output."
             echo "=========================================="
+
+            echo "Please check the Jenkins Console Output."
         }
     }
 }
