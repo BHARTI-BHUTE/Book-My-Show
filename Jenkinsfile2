@@ -1,17 +1,23 @@
 pipeline {
     agent any
 
-    tools {
-        jdk 'jdk17'
-        nodejs 'node23'
-    }
-
     environment {
-        SCANNER_HOME = tool 'sonar-scanner'
-        DOCKER_IMAGE = '093366266423.dkr.ecr.ap-south-1.amazonaws.com/bookmyshow:latest'
-        ECR_REGISTRY = '093366266423.dkr.ecr.ap-south-1.amazonaws.com'
-        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+        // GitHub Repository
+        GITHUB_REPO = 'https://github.com/BHARTI-BHUTE/Book-My-Show.git'
+        GITHUB_BRANCH = 'main'
+
+        // AWS / ECR
         AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '093366266423'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REPOSITORY = 'bookmyshow'
+        DOCKER_IMAGE = "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+        // EKS
+        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+
+        // SonarQube
+        SCANNER_HOME = tool 'sonar-scanner'
     }
 
     stages {
@@ -24,10 +30,43 @@ pipeline {
 
         stage('Checkout from Git') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/staragile2016/Book-My-Show.git'
+                git branch: "${GITHUB_BRANCH}",
+                    url: "${GITHUB_REPO}"
 
-                sh 'ls -la'
+                sh '''
+                    echo "===== Git Repository ====="
+                    git remote -v
+
+                    echo "===== Current Branch ====="
+                    git branch
+
+                    echo "===== Project Files ====="
+                    ls -la
+                '''
+            }
+        }
+
+        stage('Build and Test') {
+            steps {
+                sh '''
+                    echo "===== Node.js Version ====="
+                    node --version
+
+                    echo "===== npm Version ====="
+                    npm --version
+
+                    echo "===== Installing Dependencies ====="
+                    cd bookmyshow-app
+                    npm install
+
+                    echo "===== Checking Test Script ====="
+                    if npm run | grep -q " test"; then
+                        echo "Test script found. Running npm test..."
+                        npm test
+                    else
+                        echo "No npm test script configured. Skipping test execution."
+                    fi
+                '''
             }
         }
 
@@ -35,9 +74,11 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonar-server') {
                     sh '''
-                    $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=BMS \
-                        -Dsonar.projectKey=BMS
+                        echo "===== SonarQube Analysis ====="
+
+                        $SCANNER_HOME/bin/sonar-scanner \
+                            -Dsonar.projectName=BMS \
+                            -Dsonar.projectKey=BMS
                     '''
                 }
             }
@@ -54,24 +95,7 @@ pipeline {
             }
         }
 
-        stage('Install Dependencies') {
-            steps {
-                sh '''
-                cd bookmyshow-app
-                ls -la
-
-                if [ -f package.json ]; then
-                    rm -rf node_modules package-lock.json
-                    npm install
-                else
-                    echo "Error: package.json not found in bookmyshow-app!"
-                    exit 1
-                fi
-                '''
-            }
-        }
-
-        stage('OWASP FS Scan') {
+        stage('OWASP Dependency Check') {
             steps {
                 dependencyCheck(
                     additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
@@ -84,85 +108,118 @@ pipeline {
             }
         }
 
-        stage('Trivy FS Scan') {
+        stage('Trivy File System Scan') {
             steps {
                 sh '''
-                trivy fs . > trivyfs.txt
+                    echo "===== Trivy File System Scan ====="
+
+                    trivy fs . \
+                        --format table \
+                        -o trivyfs.txt
+
+                    echo "Trivy scan completed."
                 '''
             }
         }
 
-        stage('Docker Build & Push to ECR') {
+        stage('Docker Build') {
             steps {
-                script {
-                    sh '''
-                    echo "Building Docker image..."
+                sh '''
+                    echo "===== Docker Build ====="
 
                     docker build --no-cache \
-                        -t $DOCKER_IMAGE \
+                        -t ${DOCKER_IMAGE} \
                         -f bookmyshow-app/Dockerfile \
                         bookmyshow-app
 
-                    echo "Logging in to Amazon ECR..."
-
-                    aws ecr get-login-password \
-                        --region $AWS_REGION | \
-                        docker login \
-                        --username AWS \
-                        --password-stdin $ECR_REGISTRY
-
-                    echo "Pushing Docker image to Amazon ECR..."
-
-                    docker push $DOCKER_IMAGE
-
-                    echo "Docker image successfully pushed to ECR."
-                    '''
-                }
+                    echo "Docker image created:"
+                    docker images | grep bookmyshow
+                '''
             }
         }
 
-        stage('Deploy to EKS Cluster') {
+        stage('Login to Amazon ECR') {
             steps {
-                script {
-                    sh '''
-                    echo "Verifying AWS credentials..."
+                sh '''
+                    echo "===== AWS Account ====="
                     aws sts get-caller-identity
 
-                    echo "Configuring kubectl for EKS cluster..."
+                    echo "===== ECR Login ====="
+
+                    aws ecr get-login-password \
+                        --region ${AWS_REGION} | \
+                    docker login \
+                        --username AWS \
+                        --password-stdin ${ECR_REGISTRY}
+                '''
+            }
+        }
+
+        stage('Push Docker Image to ECR') {
+            steps {
+                sh '''
+                    echo "===== Pushing Docker Image to ECR ====="
+
+                    docker push ${DOCKER_IMAGE}
+
+                    echo "Docker image successfully pushed:"
+                    echo ${DOCKER_IMAGE}
+                '''
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                sh '''
+                    echo "===== AWS Credentials Verification ====="
+                    aws sts get-caller-identity
+
+                    echo "===== Updating kubeconfig ====="
 
                     aws eks update-kubeconfig \
-                        --name $EKS_CLUSTER_NAME \
-                        --region $AWS_REGION
+                        --region ${AWS_REGION} \
+                        --name ${EKS_CLUSTER_NAME}
 
-                    echo "Verifying Kubernetes configuration..."
+                    echo "===== Kubernetes Context ====="
                     kubectl config current-context
 
-                    echo "Deploying application to EKS..."
-
+                    echo "===== Applying Deployment ====="
                     kubectl apply -f deployment.yml
+
+                    echo "===== Applying Service ====="
                     kubectl apply -f service.yml
 
-                    echo "Verifying deployment..."
+                    echo "===== Kubernetes Deployment ====="
+                    kubectl get deployment
 
+                    echo "===== Kubernetes Pods ====="
                     kubectl get pods
+
+                    echo "===== Kubernetes Service ====="
                     kubectl get svc
-                    '''
-                }
+                '''
             }
         }
     }
 
     post {
         always {
-            emailext(
-                attachLog: true,
-                subject: "'${currentBuild.result}' - BookMyShow CI/CD Pipeline",
-                body: "Project: ${env.JOB_NAME}<br/>" +
-                      "Build Number: ${env.BUILD_NUMBER}<br/>" +
-                      "URL: ${env.BUILD_URL}<br/>",
-                to: 'bhartibhute35@gmail.com',
-                attachmentsPattern: 'trivyfs.txt'
+            archiveArtifacts(
+                artifacts: 'trivyfs.txt',
+                allowEmptyArchive: true
             )
+
+            echo "===== CI/CD Pipeline Completed ====="
+            echo "Build Number: ${BUILD_NUMBER}"
+            echo "Build Status: ${currentBuild.currentResult}"
+        }
+
+        success {
+            echo "BookMyShow CI/CD Pipeline completed successfully."
+        }
+
+        failure {
+            echo "BookMyShow CI/CD Pipeline failed. Check the Console Output."
         }
     }
 }
