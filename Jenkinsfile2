@@ -2,12 +2,6 @@ pipeline {
 
     agent any
 
-    tools {
-        // Jenkins → Manage Jenkins → Tools
-        // Must exactly match your SonarQube Scanner installation name
-        sonarRunner 'sonar-scanner'
-    }
-
     environment {
 
         // ==============================
@@ -25,11 +19,7 @@ pipeline {
         // EKS CONFIGURATION
         // ==============================
         EKS_CLUSTER = 'bookmyshow-eks'
-
-        // Kubernetes deployment name
         K8S_DEPLOYMENT = 'bms-app'
-
-        // Kubernetes container name
         K8S_CONTAINER = 'bms-container'
 
         // ==============================
@@ -60,15 +50,19 @@ pipeline {
                 echo "===== SonarQube Analysis ====="
 
                 withSonarQubeEnv('sonar-server') {
-                    sh '''
-                        echo "Running SonarQube Scanner..."
+                    script {
+                        def scannerHome = tool 'sonar-scanner'
 
-                        sonar-scanner \
-                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                            -Dsonar.projectName=${SONAR_PROJECT_NAME} \
-                            -Dsonar.sources=bookmyshow-app \
-                            -Dsonar.exclusions=bookmyshow-app/node_modules/**
-                    '''
+                        sh """
+                            echo "Running SonarQube Scanner..."
+
+                            ${scannerHome}/bin/sonar-scanner \
+                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                -Dsonar.projectName=${SONAR_PROJECT_NAME} \
+                                -Dsonar.sources=bookmyshow-app \
+                                -Dsonar.exclusions=bookmyshow-app/node_modules/**
+                        """
+                    }
                 }
             }
         }
@@ -118,7 +112,7 @@ pipeline {
         }
 
         // ==========================================
-        // 6. UPDATE EKS KUBECONFIG
+        // 6. CONFIGURE EKS
         // ==========================================
         stage('Configure EKS') {
             steps {
